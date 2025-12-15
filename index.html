@@ -18,8 +18,8 @@
   const ctx = canvas.getContext("2d");
 
   const COLORS = {
-    P1: "#000",  // 下：黒
-    P2: "#888"   // 上：グレー
+    P1: "#000",
+    P2: "#888"
   };
 
   const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
@@ -28,16 +28,27 @@
     paddleW: 0.3,
     paddleH: 12,
     inset: 16,
+
     ballR: 0.018,
     speed: 0.55,
+    ballDrawScale: 1.65, // ★ハート/星の見た目だけ拡大
+
     cols: 6,
     rows: 3,
     gap: 8,
-    radius: 8   // 角丸半径（ブロック/パドル）
+
+    radius: 8,          // 角丸（ブロック/パドル/パネル/ボタン）
+    panelW: 0.80,       // 勝利パネル幅（画面比）
+    panelH: 0.22,       // 勝利パネル高さ（画面比）
+    buttonW: 0.62,      // ボタン幅（パネル比）
+    buttonH: 52,        // ボタン高さ（px）
   };
 
   let W,H,midY;
   let p1,p2,b1,b2,blocksTop=[],blocksBottom=[],winner=null;
+
+  // 勝利ボタン当たり判定
+  let winBtn = null;
 
   function resize(){
     W=innerWidth;H=innerHeight;midY=H/2;
@@ -66,7 +77,7 @@
       x:p.x+p.w/2,
       y:isTop?p.y+p.h+r+2:p.y-r-2,
       vx:0,vy:0,state:"WAIT",
-      shape: isTop ? "star" : "heart" // ★上 / ♥下（当たり判定は円のまま）
+      shape: isTop ? "star" : "heart" // ★上 / ♥下（判定は円）
     };
   }
 
@@ -91,6 +102,7 @@
 
   function reset(){
     winner=null;
+    winBtn=null;
     p2=paddle(true); p1=paddle(false);
     b2=ball(true,p2); b1=ball(false,p1);
     blocksTop=makeBlocks(true);
@@ -156,7 +168,7 @@
     ctx.fill();
   }
 
-  // ♥描画（見た目だけ）
+  // ♥（描画のみ）
   function drawHeart(x, y, r) {
     ctx.beginPath();
     ctx.moveTo(x, y + r * 0.6);
@@ -174,7 +186,7 @@
     ctx.fill();
   }
 
-  // ★描画（見た目だけ）
+  // ★（描画のみ）
   function drawStar(x, y, r) {
     const spikes = 5;
     const outer = r;
@@ -195,10 +207,12 @@
 
   function drawBallShape(ball, color) {
     ctx.fillStyle = color;
+    const rDraw = ball.r * SET.ballDrawScale;
+
     if (ball.shape === "heart") {
-      drawHeart(ball.x, ball.y, ball.r);
+      drawHeart(ball.x, ball.y, rDraw);
     } else if (ball.shape === "star") {
-      drawStar(ball.x, ball.y, ball.r);
+      drawStar(ball.x, ball.y, rDraw);
     } else {
       ctx.beginPath();
       ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
@@ -206,9 +220,63 @@
     }
   }
 
+  function pointInRect(px, py, r){
+    return px>=r.x && px<=r.x+r.w && py>=r.y && py<=r.y+r.h;
+  }
+
+  function drawWinPanel(){
+    const pw = W * SET.panelW;
+    const ph = H * SET.panelH;
+    const px = (W - pw)/2;
+    const py = (H - ph)/2;
+
+    // パネル
+    ctx.fillStyle = "#fff";
+    roundRect(px, py, pw, ph, SET.radius * 1.5);
+
+    // パネル枠（薄いグレー）
+    ctx.strokeStyle = "#ddd";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    const rr = Math.min(SET.radius * 1.5, pw/2, ph/2);
+    ctx.moveTo(px+rr,py);
+    ctx.arcTo(px+pw,py,px+pw,py+ph,rr);
+    ctx.arcTo(px+pw,py+ph,px,py+ph,rr);
+    ctx.arcTo(px,py+ph,px,py,rr);
+    ctx.arcTo(px,py,px+pw,py,rr);
+    ctx.closePath();
+    ctx.stroke();
+
+    // テキスト
+    ctx.fillStyle = "#000";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = "bold 34px 'Hiragino Maru Gothic ProN','Hiragino Sans',system-ui";
+    const title = winner==="P1" ? "１Pのかち！" : "２Pのかち！";
+    ctx.fillText(title, W/2, py + ph*0.36);
+
+    // ボタン
+    const bw = pw * SET.buttonW;
+    const bh = SET.buttonH;
+    const bx = (W - bw)/2;
+    const by = py + ph*0.60;
+
+    // クリック判定保存
+    winBtn = { x: bx, y: by, w: bw, h: bh };
+
+    // ボタン描画
+    ctx.fillStyle = "#000";
+    roundRect(bx, by, bw, bh, SET.radius * 1.6);
+
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 20px 'Hiragino Maru Gothic ProN','Hiragino Sans',system-ui";
+    ctx.fillText("もういっかい", W/2, by + bh/2);
+  }
+
   function draw(){
     ctx.clearRect(0,0,W,H);
 
+    // ブロック + パドル
     ctx.fillStyle=COLORS.P2;
     blocksTop.forEach(b=>b.alive&&roundRect(b.x,b.y,b.w,b.h,SET.radius));
     roundRect(p2.x,p2.y,p2.w,p2.h,SET.radius);
@@ -217,16 +285,13 @@
     blocksBottom.forEach(b=>b.alive&&roundRect(b.x,b.y,b.w,b.h,SET.radius));
     roundRect(p1.x,p1.y,p1.w,p1.h,SET.radius);
 
-    // ボール（見た目：★と♥ / 判定：円）
+    // ボール（★/♥）
     drawBallShape(b2, COLORS.P2);
     drawBallShape(b1, COLORS.P1);
 
+    // 勝利パネル（最前面）
     if(winner){
-      ctx.fillStyle="#000";
-      ctx.font="bold 32px 'Hiragino Maru Gothic ProN','Hiragino Sans',system-ui";
-      ctx.textAlign="center";
-      const text = winner==="P1" ? "１Pのかち！" : "２Pのかち！";
-      ctx.fillText(text,W/2,H/2);
+      drawWinPanel();
     }
   }
 
@@ -239,16 +304,27 @@
     draw(); requestAnimationFrame(loop);
   }
 
-  // 発射：自分側の半分をタップ（WAIT中のみ）
+  // 入力
   canvas.addEventListener("pointerdown",e=>{
-    if (winner) { reset(); return; }
-    const y=e.clientY;
-    if(y<midY){ if(b2.state==="WAIT") launch(b2,1); }
-    else{ if(b1.state==="WAIT") launch(b1,-1); }
+    const x=e.clientX, y=e.clientY;
+
+    if (winner) {
+      if (winBtn && pointInRect(x, y, winBtn)) reset();
+      return;
+    }
+
+    // 発射（WAIT中のみ）
+    if(y<midY){
+      if(b2.state==="WAIT") launch(b2, 1);
+    } else {
+      if(b1.state==="WAIT") launch(b1,-1);
+    }
   });
 
   // 移動：指追従（スクロール風）
   canvas.addEventListener("pointermove",e=>{
+    if (winner) return;
+
     const x=e.clientX, y=e.clientY;
     if(y<midY){
       p2.x=clamp(x-p2.w/2,0,W-p2.w);
@@ -265,3 +341,4 @@
 </script>
 </body>
 </html>
+

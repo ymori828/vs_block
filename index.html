@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <title>2P ブロック崩し（上下）</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #fff; }
+    #wrap {
+      height: 100%;
+      display: grid;
+      place-items: center;
+      touch-action: none; /* スクロール抑止（ゲーム用） */
+      user-select: none;
+    }
+    canvas { background: #fff; }
+    #hud {
+      position: fixed;
+      left: 0; right: 0; top: 0;
+      padding: 10px 12px;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      font-size: 14px;
+      color: #000;
+      pointer-events: none;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div id="hud"></div>
+  <div id="wrap">
+    <canvas id="game"></canvas>
+  </div>
+
+  <script>
+    (() => {
+      const canvas = document.getElementById("game");
+      const ctx = canvas.getContext("2d");
+      const hud = document.getElementById("hud");
+
+      // ====== サイズ調整 ======
+      function resize() {
+        const w = Math.min(window.innerWidth, 520); // 大きすぎないように（任意）
+        const h = Math.min(window.innerHeight, 900);
+        // 端末の実サイズいっぱいにしたい場合は上のminを外してOK
+        canvas.width = Math.floor(window.innerWidth * devicePixelRatio);
+        canvas.height = Math.floor(window.innerHeight * devicePixelRatio);
+        canvas.style.width = window.innerWidth + "px";
+        canvas.style.height = window.innerHeight + "px";
+        ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+      }
+      window.addEventListener("resize", () => {
+        resize();
+        resetAll(); // まずは簡単にリセット（調整したければ保持にもできる）
+      });
+
+      // ====== ユーティリティ ======
+      const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+      const rand = (a, b) => a + Math.random() * (b - a);
+
+      // ====== ゲーム設定（調整ポイント） ======
+      const SETTINGS = {
+        // ブロック
+        blockCols: 6,
+        blockRows: 3,
+        blockGap: 6,
+        blockMarginX: 14,
+        blockBandRatioHalf: 0.28, // 各半分の中で「中央寄りブロック帯」の高さ割合
+
+        // パドル
+        paddleWidthRatio: 0.30,
+        paddleHeight: 10,
+        paddleInset: 14, // 端からの距離
+
+        // ボール
+        ballRadiusRatio: 0.018,   // 画面幅に対する比率
+        ballSpeedRatio: 0.55,     // 画面幅に対する比率（秒あたり…っぽい速度）
+        launchAngleMaxDeg: 28,    // 発射角のブレ（度）
+        maxBallCount: 2,          // 今回は固定2個（P1とP2）
+      };
+
+      // ====== 状態 ======
+      let W = 0, H = 0, midY = 0;
+      let paddle1, paddle2;
+      let ball1, ball2;
+      let blocksTop = [];    // P2のブロック（中央上）
+      let blocksBottom = []; // P1のブロック（中央下）
+      let winner = null;
+
+      function recomputeDimensions() {
+        W = window.innerWidth;
+        H = window.innerHeight;
+        midY = H / 2;
+      }
+
+      function makePaddle(isTop) {
+        const pw = W * SETTINGS.paddleWidthRatio;
+        const x = (W - pw) / 2;
+        const y = isTop
+          ? SETTINGS.paddleInset
+          : H - SETTINGS.paddleInset - SETTINGS.paddleHeight;
+        return { x, y, w: pw, h: SETTINGS.paddleHeight };
+      }
+
+      function makeBall(isTop, paddle) {
+        const r = Math.max(6, W * SETTINGS.ballRadiusRatio);
+        const speed = Math.max(260, W * SETTINGS.ballSpeedRatio); // px/sec
+        // 待機位置：パドルの内側
+        const x = paddle.x + paddle.w / 2;
+        const y = isTop ? (paddle.y + paddle.h + r + 2) : (paddle.y - r - 2);
+        return {
+          r,
+          speed,
+          x, y,
+          vx: 0,
+          vy: 0,
+          state: "WAITING", // WAITING | MOVING
+          owner: isTop ? "P2" : "P1",
+        };
+      }
+
+      function makeBlocks(isTop) {
+        const blocks = [];
+        const halfH = H / 2;
+        const bandH = halfH * SETTINGS.blockBandRatioHalf;
+
+        const bandTopY = isTop ? (midY - bandH) : midY;
+        const bandBottomY = isTop ? midY : (midY + bandH);
+
+        const totalGapX = (SETTINGS.blockCols - 1) * SETTINGS.blockGap;
+        const usableW = W - SETTINGS.blockMarginX * 2;
+        const blockW = (usableW - totalGapX) / SETTINGS.blockCols;
+
+        const totalGapY = (SETTINGS.blockRows - 1) * SETTINGS.blockGap;
+        const usableH = bandH * 0.82; // 帯の中で少し余白
+        const blockH = (usableH - totalGapY) / SETTINGS.blockRows;
+
+        const startX = SETTINGS.blockMarginX;
+        // 中央寄りに寄せる（帯の端から少し離す）
+        const startY = bandTopY + (bandH - usableH) / 2;
+
+        for (let row = 0; row < SETTINGS.blockRows; row++) {
+          for (let col = 0; col < SETTINGS.blockCols; col++) {
+            const x = startX + col * (blockW + SETTINGS.blockGap);
+            const y = startY + row * (blockH + SETTINGS.blockGap);
+            blocks.push({ x, y, w: blockW, h: blockH, alive: true });
+          }
+        }
+        return blocks;
+      }
+
+      function resetAll() {
+        winner = null;
+        recomputeDimensions();
+        paddle2 = makePaddle(true);  // 上（P2）
+        paddle1 = makePaddle(false); // 下（P1）
+
+        ball2 = makeBall(true, paddle2);
+        ball1 = makeBall(false, paddle1);
+
+        blocksTop = makeBlocks(true);
+        blocksBottom = makeBlocks(false);
+
+        hud.textContent = "上：P2 / 下：P1（タップでパドル移動。ボール待機中はタップで発射）";
+      }
+
+      // ====== 入力（タップ移動＆発射） ======
+      function onPointer(e) {
+        if (winner) return;
+
+        const rect = canvas.getBoundingClientRect();
+        const x = (e.clientX - rect.left);
+        const y = (e.clientY - rect.top);
+
+        const isTop = y < midY;
+        if (isTop) {
+          movePaddleToX(paddle2, x);
+          if (ball2.state === "WAITING") launchBall(ball2, true);
+        } else {
+          movePaddleToX(paddle1, x);
+          if (ball1.state === "WAITING") launchBall(ball1, false);
+        }
+      }
+      canvas.addEventListener("pointerdown", onPointer);
+
+      function movePaddleToX(paddle, tapX) {
+        const targetCenter = tapX;
+        const half = paddle.w / 2;
+        paddle.x = clamp(targetCenter - half, 0, W - paddle.w);
+
+        // ボールがWAITINGならパドルに追従
+        if (paddle === paddle1 && ball1.state === "WAITING") stickBallToPaddle(ball1, paddle, false);
+        if (paddle === paddle2 && ball2.state === "WAITING") stickBallToPaddle(ball2, paddle, true);
+      }
+
+      function stickBallToPaddle(ball, paddle, isTop) {
+        ball.x = paddle.x + paddle.w / 2;
+        ball.y = isTop ? (paddle.y + paddle.h + ball.r + 2) : (paddle.y - ball.r - 2);
+      }
+
+      function launchBall(ball, isTop) {
+        // isTop: 上プレイヤーのボールは「下向き」へ
+        const signY = isTop ? +1 : -1;
+        const max = SETTINGS.launchAngleMaxDeg * Math.PI / 180;
+        const ang = rand(-max, +max);
+
+        const vx = Math.sin(ang) * ball.speed;
+        const vy = signY * Math.cos(ang) * ball.speed;
+
+        ball.vx = vx;
+        ball.vy = vy;
+        ball.state = "MOVING";
+      }
+
+      // ====== 物理＆判定 ======
+      function circleRectCollide(cx, cy, r, rx, ry, rw, rh) {
+        // AABBに対する最近点
+        const closestX = clamp(cx, rx, rx + rw);
+        const closestY = clamp(cy, ry, ry + rh);
+        const dx = cx - closestX;
+        const dy = cy - closestY;
+        return (dx*dx + dy*dy) <= r*r;
+      }
+
+      function reflectFromPaddle(ball, paddle) {
+        // 上下反転
+        ball.vy *= -1;
+
+        // 当たった位置で少し角度を付ける（ゲームっぽさ）
+        const hit = (ball.x - (paddle.x + paddle.w / 2)) / (paddle.w / 2); // -1..1
+        ball.vx += hit * (ball.speed * 0.35);
+
+        // 速度が暴れないように正規化
+        const v = Math.hypot(ball.vx, ball.vy);
+        if (v > 0) {
+          ball.vx = (ball.vx / v) * ball.speed;
+          ball.vy = (ball.vy / v) * ball.speed;
+        }
+      }
+
+      function updateBall(ball, dt) {
+        if (ball.state !== "MOVING") return;
+
+        // 移動
+        ball.x += ball.vx * dt;
+        ball.y += ball.vy * dt;
+
+        // 左右壁
+        if (ball.x - ball.r < 0) {
+          ball.x = ball.r;
+          ball.vx *= -1;
+        } else if (ball.x + ball.r > W) {
+          ball.x = W - ball.r;
+          ball.vx *= -1;
+        }
+
+        // パドル（上下どちらでも反射）
+        // P2パドル
+        if (circleRectCollide(ball.x, ball.y, ball.r, paddle2.x, paddle2.y, paddle2.w, paddle2.h)) {
+          // めり込み補正
+          ball.y = paddle2.y + paddle2.h + ball.r + 0.5;
+          reflectFromPaddle(ball, paddle2);
+        }
+        // P1パドル
+        if (circleRectCollide(ball.x, ball.y, ball.r, paddle1.x, paddle1.y, paddle1.w, paddle1.h)) {
+          ball.y = paddle1.y - ball.r - 0.5;
+          reflectFromPaddle(ball, paddle1);
+        }
+
+        // ブロック（当たったら壊してY反転でOK）
+        // 上ブロック群
+        for (const b of blocksTop) {
+          if (!b.alive) continue;
+          if (circleRectCollide(ball.x, ball.y, ball.r, b.x, b.y, b.w, b.h)) {
+            b.alive = false;
+            ball.vy *= -1;
+            break;
+          }
+        }
+        // 下ブロック群
+        for (const b of blocksBottom) {
+          if (!b.alive) continue;
+          if (circleRectCollide(ball.x, ball.y, ball.r, b.x, b.y, b.w, b.h)) {
+            b.alive = false;
+            ball.vy *= -1;
+            break;
+          }
+        }
+
+        // ロスト（画面外）
+        if (ball.y < -ball.r || ball.y > H + ball.r) {
+          // WAITINGへ戻す（無限リスポーン）
+          ball.state = "WAITING";
+          ball.vx = 0; ball.vy = 0;
+          if (ball.owner === "P2") stickBallToPaddle(ball, paddle2, true);
+          else stickBallToPaddle(ball, paddle1, false);
+        }
+      }
+
+      function checkWin() {
+        const topRemaining = blocksTop.filter(b => b.alive).length;
+        const bottomRemaining = blocksBottom.filter(b => b.alive).length;
+
+        // 「自分のブロックを全部壊したら勝ち」
+        // 上のブロックはP2のもの、下のブロックはP1のもの
+        if (topRemaining === 0) winner = "P2";
+        if (bottomRemaining === 0) winner = "P1";
+
+        if (winner) {
+          hud.textContent = `${winner} WIN！ 画面をタップするとリスタート`;
+        } else {
+          hud.textContent = `P2残り:${topRemaining} / P1残り:${bottomRemaining}（タップ移動。待機中はタップで発射）`;
+        }
+      }
+
+      // 勝利時タップでリスタート
+      canvas.addEventListener("pointerdown", (e) => {
+        if (!winner) return;
+        resetAll();
+      });
+
+      // ====== 描画 ======
+      function draw() {
+        ctx.clearRect(0, 0, W, H);
+
+        // ブロック
+        ctx.fillStyle = "#000";
+        for (const b of blocksTop) if (b.alive) ctx.fillRect(b.x, b.y, b.w, b.h);
+        for (const b of blocksBottom) if (b.alive) ctx.fillRect(b.x, b.y, b.w, b.h);
+
+        // パドル
+        ctx.fillRect(paddle2.x, paddle2.y, paddle2.w, paddle2.h);
+        ctx.fillRect(paddle1.x, paddle1.y, paddle1.w, paddle1.h);
+
+        // ボール
+        drawBall(ball2);
+        drawBall(ball1);
+
+        // 勝利時の簡易表示（モノクロ）
+        if (winner) {
+          ctx.fillStyle = "rgba(255,255,255,0.85)";
+          ctx.fillRect(0, H*0.42, W, H*0.16);
+          ctx.fillStyle = "#000";
+          ctx.font = "bold 32px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText(`${winner} WIN!`, W/2, H*0.5);
+          ctx.font = "16px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
+          ctx.fillText("Tap to restart", W/2, H*0.56);
+        }
+      }
+
+      function drawBall(ball) {
+        ctx.beginPath();
+        ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // ====== メインループ ======
+      let last = performance.now();
+      function loop(now) {
+        const dt = Math.min(0.033, (now - last) / 1000);
+        last = now;
+
+        if (!winner) {
+          updateBall(ball1, dt);
+          updateBall(ball2, dt);
+          checkWin();
+        }
+        draw();
+        requestAnimationFrame(loop);
+      }
+
+      // ====== 起動 ======
+      resize();
+      resetAll();
+      requestAnimationFrame(loop);
+    })();
+  </script>
+</body>
+</html>
